@@ -1,0 +1,3 @@
+textual>=0.70.0
+netmiko>=4.3.0
+sqlalchemy>=2.0.0

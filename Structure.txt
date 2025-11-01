@@ -1,0 +1,7 @@
+bgp_manager/
+├── main.py
+├── db.py
+├── device.py
+├── models.py
+├── logging_config.py   ← NEW
+└── bgp_manager.log     ← created on first run
