@@ -1,0 +1,32 @@
+# Database
+*.db
+
+# Logs
+*.log
+
+# Environment/credentials
+.env
+.env.*
+credentials.json
+secrets.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Pre-commit
+.secrets.baseline

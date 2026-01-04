@@ -1,4 +1,5 @@
 # device.py
+import time
 from netmiko import ConnectHandler
 from models import BGPSession
 from sqlalchemy.orm import Session
@@ -8,20 +9,41 @@ from logging_config import get_logger
 
 logger = get_logger(__name__)
 
+DEFAULT_RETRIES = 3
+DEFAULT_RETRY_DELAY = 5  # seconds
+
+
+def connect_with_retry(device_params: dict, retries: int = DEFAULT_RETRIES, delay: int = DEFAULT_RETRY_DELAY):
+    """Connect to device with retry logic."""
+    last_exception = None
+    for attempt in range(1, retries + 1):
+        try:
+            logger.debug(f"Connection attempt {attempt}/{retries} to {device_params.get('host')}")
+            conn = ConnectHandler(**device_params)
+            return conn
+        except Exception as e:
+            last_exception = e
+            logger.warning(f"Connection attempt {attempt}/{retries} failed: {e}")
+            if attempt < retries:
+                logger.info(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+    raise last_exception
+
 
 def detect_device_type(ip: str, username: str, password: str) -> str:
     logger.info(f"Detecting device type for {ip}")
     for device_type in ["cisco_xr", "nokia_sros"]:
         try:
-            conn = ConnectHandler(
-                device_type=device_type,
-                host=ip,
-                username=username,
-                password=password,
-                timeout=10,
-                session_timeout=15,
-                global_delay_factor=2,
-            )
+            device_params = {
+                "device_type": device_type,
+                "host": ip,
+                "username": username,
+                "password": password,
+                "timeout": 10,
+                "session_timeout": 15,
+                "global_delay_factor": 2,
+            }
+            conn = connect_with_retry(device_params)
             prompt = conn.find_prompt()
             conn.disconnect()
             logger.debug(f"Prompt: {prompt} → detected {device_type}")
@@ -35,21 +57,21 @@ def detect_device_type(ip: str, username: str, password: str) -> str:
 
 
 def _update_db_neighbors(
-    device_ip: str,
+    device_fqdn: str,
     device_type: str,
     neighbors: Dict[
         str, Tuple[int, str, int, str]
     ],  # (remote_as, state, local_as, local_ip)
     db: Session,
 ):
-    logger.info(f"Updating {len(neighbors)} neighbors from {device_ip} ({device_type})")
+    logger.info(f"Updating {len(neighbors)} neighbors from {device_fqdn} ({device_type})")
     for ip, (remote_as, state, local_as, local_ip) in neighbors.items():
         session = db.query(BGPSession).filter_by(neighbor_ip=ip).first()
         if session:
             session.remote_as = remote_as
             session.local_as = local_as
             session.local_ip = local_ip
-            session.device_ip = device_ip
+            session.device_fqdn = device_fqdn
             session.device_type = device_type
             session.status = "Up"
             session.session_state = state
@@ -60,7 +82,7 @@ def _update_db_neighbors(
                 remote_as=remote_as,
                 local_as=local_as,
                 local_ip=local_ip,
-                device_ip=device_ip,
+                device_fqdn=device_fqdn,
                 device_type=device_type,
                 status="Up",
                 session_state=state,
@@ -74,20 +96,20 @@ def _update_db_neighbors(
 # ──────────────────────────────────────────────────────────────
 # Cisco IOS-XR
 # ──────────────────────────────────────────────────────────────
-def sync_cisco_xr(device_ip: str, username: str, password: str, db_session_factory):
-    logger.info(f"Syncing Cisco IOS-XR device: {device_ip}")
+def sync_cisco_xr(device_fqdn: str, username: str, password: str, db_session_factory):
+    logger.info(f"Syncing Cisco IOS-XR device: {device_fqdn}")
     device = {
         "device_type": "cisco_xr",
-        "host": device_ip,
+        "host": device_fqdn,
         "username": username,
         "password": password,
     }
     try:
-        conn = ConnectHandler(**device)
+        conn = connect_with_retry(device)
         output = conn.send_command("show bgp summary vrf all | include ^[0-9]")
         conn.disconnect()
     except Exception as e:
-        logger.error(f"Netmiko failed on {device_ip}: {e}", exc_info=True)
+        logger.error(f"Netmiko failed on {device_fqdn}: {e}", exc_info=True)
         raise
 
     neighbors: Dict[str, Tuple[int, str, int, str]] = {}
@@ -103,7 +125,7 @@ def sync_cisco_xr(device_ip: str, username: str, password: str, db_session_facto
             # Local AS & Local IP are not in the summary – grab from detailed view
             # We'll run a second command for each neighbor (lightweight)
             try:
-                conn = ConnectHandler(**device)
+                conn = connect_with_retry(device)
                 detail = conn.send_command(f"show bgp neighbor {neighbor_ip}")
                 conn.disconnect()
 
@@ -119,26 +141,26 @@ def sync_cisco_xr(device_ip: str, username: str, password: str, db_session_facto
                 neighbors[neighbor_ip] = (remote_as, state, 0, "")
 
     with db_session_factory() as db:
-        _update_db_neighbors(device_ip, "cisco_xr", neighbors, db)
+        _update_db_neighbors(device_fqdn, "cisco_xr", neighbors, db)
 
 
 # ──────────────────────────────────────────────────────────────
 # Nokia SR OS
 # ──────────────────────────────────────────────────────────────
-def sync_nokia_sros(device_ip: str, username: str, password: str, db_session_factory):
-    logger.info(f"Syncing Nokia SR OS device: {device_ip}")
+def sync_nokia_sros(device_fqdn: str, username: str, password: str, db_session_factory):
+    logger.info(f"Syncing Nokia SR OS device: {device_fqdn}")
     device = {
         "device_type": "nokia_sros",
-        "host": device_ip,
+        "host": device_fqdn,
         "username": username,
         "password": password,
     }
     try:
-        conn = ConnectHandler(**device)
+        conn = connect_with_retry(device)
         output = conn.send_command("show router bgp neighbor | match Expression")
         conn.disconnect()
     except Exception as e:
-        logger.error(f"Netmiko failed on {device_ip}: {e}", exc_info=True)
+        logger.error(f"Netmiko failed on {device_fqdn}: {e}", exc_info=True)
         raise
 
     neighbors: Dict[str, Tuple[int, str, int, str]] = {}
@@ -166,4 +188,4 @@ def sync_nokia_sros(device_ip: str, username: str, password: str, db_session_fac
             current_ip = None
 
     with db_session_factory() as db:
-        _update_db_neighbors(device_ip, "nokia_sros", neighbors, db)
+        _update_db_neighbors(device_fqdn, "nokia_sros", neighbors, db)
